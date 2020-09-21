@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -28,6 +30,12 @@ type ExporterAuth struct {
 	User     string `envconfig:"user" default:""`
 	Password string `envconfig:"password" default:""`
 	Header   string `envconfig:"header" default:""`
+}
+
+type ExporterTlsAuth struct {
+	CaFile   string `envconfig:"cafile" default:""`
+	CertFile string `envconfig:"certfile" default:""`
+	KeyFile  string `envconfig:"keyfile" default:""`
 }
 
 type Tag struct {
@@ -160,9 +168,33 @@ func QueryPrometheus(promURL string, queryString string) (model.Vector, error) {
 	return nil, errors.New("unexpected response type")
 }
 
-func QueryExporter(exporterURL string, auth ExporterAuth, insecureSkipVerify bool) (model.Vector, error) {
+func QueryExporter(exporterURL string, auth ExporterAuth, tlsauth ExporterTlsAuth, insecureSkipVerify bool) (model.Vector, error) {
+	var tlsConfig *tls.Config
+	if tlsauth.CaFile != "" && tlsauth.CertFile != "" && tlsauth.KeyFile != "" {
+		caCert, err := ioutil.ReadFile(tlsauth.CaFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cert, err := tls.LoadX509KeyPair(tlsauth.CertFile, tlsauth.KeyFile)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		// Setup HTTPS client
+		tlsConfig = &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: insecureSkipVerify,
+		}
+	} else {
+		tlsConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify}
+	}
+
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify},
+		TLSClientConfig: tlsConfig,
 	}
 	client := &http.Client{Transport: tr}
 	req, err := http.NewRequest("GET", exporterURL, nil)
@@ -231,6 +263,25 @@ func setExporterAuth(user string, password string, header string) (auth Exporter
 	return auth, nil
 }
 
+func setExporterTLSAuth(cafile string, certfile string, keyfile string) (tlsauth ExporterTlsAuth, error error) {
+	err := envconfig.Process(exporterAuthID, &tlsauth)
+
+	if err != nil {
+		return tlsauth, err
+	}
+
+	if certfile != "" && keyfile != "" {
+		tlsauth.CertFile = certfile
+		tlsauth.KeyFile = keyfile
+	}
+
+	if cafile != "" {
+		tlsauth.CaFile = cafile
+	}
+
+	return tlsauth, nil
+}
+
 func main() {
 	exporterURL := flag.String("exporter-url", "", "Prometheus exporter URL to pull metrics from.")
 	exporterUser := flag.String("exporter-user", "", "Prometheus exporter basic auth user.")
@@ -241,6 +292,9 @@ func main() {
 	outputFormat := flag.String("output-format", "influx", "The check output format to use for metrics {influx|graphite|json}.")
 	metricPrefix := flag.String("metric-prefix", "", "Metric name prefix, only supported by line protocol output formats.")
 	insecureSkipVerify := flag.Bool("insecure-skip-verify", false, "Skip TLS peer verification.")
+	certFile := flag.String("exporter-certfile", "", "A PEM eoncoded certificate file.")
+	keyFile := flag.String("exporter-keyfile", "", "A PEM encoded private key file.")
+	caFile := flag.String("exporter-cafile", "", "A PEM eoncoded CA's certificate file.")
 	flag.Parse()
 
 	var samples model.Vector
@@ -253,8 +307,14 @@ func main() {
 			log.Fatal(err)
 			os.Exit(2)
 		}
+		tlsauth, err := setExporterTLSAuth(*caFile, *certFile, *keyFile)
 
-		samples, err = QueryExporter(*exporterURL, auth, *insecureSkipVerify)
+		if err != nil {
+			log.Fatal(err)
+			os.Exit(2)
+		}
+
+		samples, err = QueryExporter(*exporterURL, auth, tlsauth, *insecureSkipVerify)
 
 		if err != nil {
 			log.Fatal(err)
