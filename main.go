@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -75,9 +76,21 @@ func CreateJSONMetrics(samples model.Vector) string {
 
 func CreateGraphiteMetrics(samples model.Vector, metricPrefix string) string {
 	metrics := ""
+	reg, _ := regexp.Compile("[^a-zA-Z0-9_-]")
 
 	for _, sample := range samples {
 		name := fmt.Sprintf("%s%s", metricPrefix, sample.Metric["__name__"])
+
+		for key, val := range sample.Metric {
+			k := reg.ReplaceAllString(string(key), "_")
+			v := reg.ReplaceAllString(string(val), "_")
+			if k != "__name__" {
+				labels := strings.ReplaceAll(fmt.Sprintf(".%s_%s", k, v), "__", "_")
+				if !strings.Contains(labels, "\n") && strings.Count(labels, ".") == 1 {
+					name += labels
+				}
+			}
+		}
 
 		value := strconv.FormatFloat(float64(sample.Value), 'f', -1, 64)
 
